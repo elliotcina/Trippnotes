@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MedKB — Medical Knowledge Bank</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; color: #1e293b; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  ul, ol { padding-left: 1.4em; }
+  img { max-width: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, createContext, useContext } = React;
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const SYSTEMS = [
+  "CVS","Respiratory","GI / Hepatic","Neurology","Renal / Urology",
+  "Endocrine / Metabolic","Haematology / Oncology","MSK / Rheumatology",
+  "Dermatology","Psychiatry","Reproductive / O&G","Infectious Disease","General / Other"
+];
+
+const CATS = [
+  { id:"path-nc", short:"NC Path",  label:"Pathology — Non-communicable", color:"#dc2626" },
+  { id:"path-c",  short:"C Path",   label:"Pathology — Communicable",     color:"#ea580c" },
+  { id:"drug",    short:"Drug",      label:"Drug",                          color:"#16a34a" },
+  { id:"bug",     short:"Bug",       label:"Bug / Organism",                color:"#7c3aed" },
+  { id:"process", short:"Process",   label:"Process / Concept",             color:"#2563eb" },
+];
+
+const FIELDS = {
+  "path-nc": [
+    { key:"pathophys", label:"Pathophysiology / Aetiology" },
+    { key:"signs",     label:"Signs & Symptoms" },
+    { key:"ix",        label:"Investigations / Tests" },
+    { key:"tx",        label:"Treatment / Management" },
+  ],
+  "path-c": [
+    { key:"pathophys", label:"Pathophysiology / Aetiology" },
+    { key:"signs",     label:"Signs & Symptoms" },
+    { key:"ix",        label:"Investigations / Tests" },
+    { key:"tx",        label:"Treatment / Management" },
+  ],
+  drug: [
+    { key:"indications",  label:"Indications" },
+    { key:"moa",          label:"Mechanism of Action" },
+    { key:"sideEffects",  label:"Side Effects / Contraindications / Interactions" },
+    { key:"notes",        label:"Notes" },
+  ],
+  bug: [
+    { key:"classification", label:"Classification/s" },
+    { key:"pathologies",    label:"Relevant Pathologies / Processes" },
+    { key:"treatment",      label:"Preferred Antibiotics / Treatment" },
+  ],
+  process: [
+    { key:"description", label:"Description" },
+    { key:"notes",       label:"Notes" },
+  ],
+};
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const hasContent = h => !!(h && (h.replace(/<[^>]+>/g,"").trim() || h.includes("<img")));
+
+// ── Supabase client (credentials injected via Vite env or window globals) ────
+// In Vercel: set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY as env vars.
+// For plain static hosting, set window.SUPABASE_URL and window.SUPABASE_ANON_KEY
+// in a separate config.js or via the setup screen below.
+
+function getSupabaseClient() {
+  const url  = (typeof VITE_SUPABASE_URL  !== "undefined" && VITE_SUPABASE_URL)
+            || window.SUPABASE_URL
+            || localStorage.getItem("sb_url");
+  const key  = (typeof VITE_SUPABASE_ANON_KEY !== "undefined" && VITE_SUPABASE_ANON_KEY)
+            || window.SUPABASE_ANON_KEY
+            || localStorage.getItem("sb_key");
+  if (!url || !key) return null;
+  return supabase.createClient(url, key);
+}
+
+// ── CSS helpers ───────────────────────────────────────────────────────────────
+const badge = c => ({
+  background:c, color:"#fff", fontSize:10, fontWeight:700,
+  padding:"2px 8px", borderRadius:10, display:"inline-block",
+  letterSpacing:".4px", textTransform:"uppercase", whiteSpace:"nowrap",
+});
+const inp = {
+  width:"100%", borderRadius:6, border:"1px solid #e2e8f0", padding:"7px 10px",
+  fontSize:13.5, fontFamily:"inherit", color:"#1e293b", outline:"none", background:"#fff",
+};
+const lbl = {
+  display:"block", fontWeight:700, fontSize:11, color:"#6b7280",
+  marginBottom:5, textTransform:"uppercase", letterSpacing:".5px",
+};
+const btn = {
+  border:"none", borderRadius:6, padding:"8px 20px",
+  cursor:"pointer", fontSize:13.5, fontWeight:600, fontFamily:"inherit",
+};
+
+// ── Tag helpers ───────────────────────────────────────────────────────────────
+const TAG_COLORS = ["#0ea5e9","#8b5cf6","#f59e0b","#10b981","#ef4444","#ec4899","#64748b"];
+const tagColor = t => TAG_COLORS[Math.abs(t.split("").reduce((a,c)=>a+c.charCodeAt(0),0)) % TAG_COLORS.length];
+
+function TagPill({ tag, onRemove }) {
+  return (
+    <span style={{ background:tagColor(tag)+"22", color:tagColor(tag), fontSize:11, fontWeight:600,
+      padding:"2px 8px 2px 10px", borderRadius:12, display:"inline-flex", alignItems:"center", gap:4 }}>
+      {tag}
+      {onRemove && <span onClick={onRemove} style={{ cursor:"pointer", fontWeight:900, fontSize:12, lineHeight:1 }}>×</span>}
+    </span>
+  );
+}
+
+function TagInput({ tags=[], onChange, allTags=[] }) {
+  const [val, setVal] = useState("");
+  const suggestions = allTags.filter(t => !tags.includes(t) && t.toLowerCase().includes(val.toLowerCase()) && val);
+  const add = t => { const c = t.trim(); if (c && !tags.includes(c)) onChange([...tags, c]); setVal(""); };
+  return (
+    <div>
+      <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:6 }}>
+        {tags.map(t => <TagPill key={t} tag={t} onRemove={() => onChange(tags.filter(x=>x!==t))}/>)}
+      </div>
+      <div style={{ position:"relative" }}>
+        <input value={val} onChange={e=>setVal(e.target.value)}
+          onKeyDown={e=>{ if ((e.key==="Enter"||e.key===",") && val.trim()) { e.preventDefault(); add(val); }}}
+          placeholder="Add tag, press Enter…"
+          style={{ ...inp, fontSize:12.5, padding:"5px 10px" }}/>
+        {suggestions.length > 0 && (
+          <div style={{ position:"absolute", top:"100%", left:0, right:0, background:"#fff",
+            border:"1px solid #e2e8f0", borderRadius:6, zIndex:50,
+            boxShadow:"0 4px 12px rgba(0,0,0,.1)", maxHeight:140, overflow:"auto" }}>
+            {suggestions.map(t => (
+              <div key={t} onClick={()=>add(t)}
+                style={{ padding:"6px 12px", cursor:"pointer", fontSize:13 }}
+                onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <TagPill tag={t}/>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Link picker ───────────────────────────────────────────────────────────────
+function LinkPicker({ entries, currentId, linked=[], onAdd, onClose }) {
+  const [q, setQ] = useState("");
+  const candidates = entries.filter(e =>
+    e.id !== currentId && !linked.includes(e.id) &&
+    (!q || e.name.toLowerCase().includes(q.toLowerCase()))
+  );
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.35)", zIndex:200,
+      display:"flex", alignItems:"center", justifyContent:"center" }}
+      onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+      <div style={{ background:"#fff", borderRadius:12, width:360, maxHeight:480,
+        display:"flex", flexDirection:"column", boxShadow:"0 12px 40px rgba(0,0,0,.2)" }}>
+        <div style={{ padding:"16px 18px", borderBottom:"1px solid #e2e8f0", display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontWeight:700, fontSize:15, flex:1 }}>🔗 Link to Entry</span>
+          <button onClick={onClose} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, color:"#94a3b8" }}>×</button>
+        </div>
+        <div style={{ padding:"10px 14px" }}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search entries…"
+            style={{ ...inp, fontSize:13 }} autoFocus/>
+        </div>
+        <div style={{ flex:1, overflow:"auto", padding:"0 10px 10px" }}>
+          {candidates.length === 0
+            ? <div style={{ color:"#94a3b8", fontSize:13, textAlign:"center", padding:20 }}>No results</div>
+            : candidates.map(e => {
+                const c = CATS.find(c=>c.id===e.category);
+                return (
+                  <div key={e.id} onClick={()=>{ onAdd(e.id); onClose(); }}
+                    style={{ padding:"8px 10px", borderRadius:7, cursor:"pointer", display:"flex", alignItems:"center", gap:8 }}
+                    onMouseEnter={ev=>ev.currentTarget.style.background="#f8fafc"}
+                    onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
+                    <span style={badge(c.color)}>{c.short}</span>
+                    <span style={{ fontSize:13.5, fontWeight:600, color:"#0f172a" }}>{e.name}</span>
+                  </div>
+                );
+              })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Rich editor ───────────────────────────────────────────────────────────────
+function RichEditor({ initVal="", onChange }) {
+  const ref = useRef(null);
+  const imgRef = useRef(null);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    if (!mounted.current && ref.current) {
+      ref.current.innerHTML = initVal;
+      mounted.current = true;
+    }
+  }, []);
+
+  const exec = (cmd, val=null) => {
+    ref.current.focus();
+    try { document.execCommand(cmd, false, val); } catch{}
+    onChange(ref.current.innerHTML);
+  };
+
+  const insertSymbol = sym => {
+    ref.current.focus();
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      const r = sel.getRangeAt(0);
+      r.deleteContents();
+      r.insertNode(document.createTextNode(sym));
+      r.collapse(false);
+      sel.removeAllRanges(); sel.addRange(r);
+    } else {
+      ref.current.innerHTML += sym;
+    }
+    onChange(ref.current.innerHTML);
+  };
+
+  const onImg = e => {
+    const f = e.target.files[0]; if (!f) return;
+    const fr = new FileReader();
+    fr.onload = ev => {
+      exec("insertHTML", `<img src="${ev.target.result}" style="max-width:100%;border-radius:5px;margin:6px 0;display:block;"/>`);
+      e.target.value = "";
+    };
+    fr.readAsDataURL(f);
+  };
+
+  const PALETTE = ["#111827","#dc2626","#ea580c","#ca8a04","#16a34a","#2563eb","#7c3aed","#db2777","#64748b","#ffffff"];
+
+  const tbtn = (label, action, style={}) => (
+    <button key={label} type="button"
+      onMouseDown={e=>{ e.preventDefault(); action(); }}
+      style={{ background:"#fff", border:"1px solid #e2e8f0", borderRadius:3,
+        padding:"2px 7px", cursor:"pointer", fontSize:11, fontFamily:"inherit", color:"#374151", ...style }}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ border:"1px solid #e2e8f0", borderRadius:6, overflow:"hidden" }}>
+      <div style={{ display:"flex", flexWrap:"wrap", gap:2, padding:"5px 8px",
+        background:"#f8fafc", borderBottom:"1px solid #e2e8f0", alignItems:"center" }}>
+        {tbtn("B", ()=>exec("bold"), {fontWeight:700})}
+        {tbtn("I", ()=>exec("italic"), {fontStyle:"italic"})}
+        {tbtn("U", ()=>exec("underline"), {textDecoration:"underline"})}
+        <div style={{ width:1, background:"#e2e8f0", height:14, margin:"0 2px" }}/>
+        {tbtn("• List", ()=>{ ref.current.focus(); document.execCommand("insertUnorderedList",false,null); onChange(ref.current.innerHTML); })}
+        {tbtn("1. List", ()=>{ ref.current.focus(); document.execCommand("insertOrderedList",false,null); onChange(ref.current.innerHTML); })}
+        <div style={{ width:1, background:"#e2e8f0", height:14, margin:"0 2px" }}/>
+        {tbtn("↑", ()=>insertSymbol("↑"))}
+        {tbtn("↓", ()=>insertSymbol("↓"))}
+        <div style={{ width:1, background:"#e2e8f0", height:14, margin:"0 2px" }}/>
+        {PALETTE.map(c => (
+          <div key={c} onMouseDown={e=>{ e.preventDefault(); exec("foreColor",c); }}
+            style={{ width:13, height:13, background:c, borderRadius:2, cursor:"pointer",
+              border:"1px solid #cbd5e1", flexShrink:0 }}/>
+        ))}
+        <div style={{ width:1, background:"#e2e8f0", height:14, margin:"0 2px" }}/>
+        {tbtn("🖼", ()=>imgRef.current.click())}
+        <input ref={imgRef} type="file" accept="image/*" style={{ display:"none" }} onChange={onImg}/>
+      </div>
+      <div ref={ref} contentEditable suppressContentEditableWarning
+        onInput={()=>onChange(ref.current.innerHTML)}
+        style={{ padding:"10px 12px", minHeight:90, outline:"none",
+          fontSize:13.5, lineHeight:1.7, color:"#1e293b" }}/>
+    </div>
+  );
+}
+
+// ── Entry form ────────────────────────────────────────────────────────────────
+function EntryForm({ initial, entries, allTags, onSubmit, onCancel }) {
+  const isEdit = !!initial;
+  const [cat, setCat] = useState(initial?.category || "path-nc");
+  const [form, setForm] = useState(() => initial || {});
+  const [tags, setTags] = useState(initial?.tags || []);
+  const [linked, setLinked] = useState(initial?.linked || []);
+  const [showPicker, setShowPicker] = useState(false);
+  const [err, setErr] = useState("");
+  const [fKey, setFKey] = useState(0);
+
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const changeCat = c => {
+    if (c===cat) return;
+    setCat(c);
+    setForm(f=>({ name:f.name, bodySystem:f.bodySystem, drugClass:f.drugClass }));
+    setFKey(k=>k+1);
+  };
+
+  const submit = () => {
+    if (!form.name?.trim()) { setErr("Name is required."); return; }
+    onSubmit({ ...(isEdit?{id:initial.id,createdAt:initial.createdAt}:{}), ...form, category:cat, tags, linked });
+  };
+
+  const fields = FIELDS[cat] || [];
+
+  return (
+    <div style={{ maxWidth:780, margin:"24px auto", padding:"0 16px 80px" }}>
+      {showPicker && (
+        <LinkPicker entries={entries} currentId={initial?.id} linked={linked}
+          onAdd={id=>setLinked(l=>[...l,id])} onClose={()=>setShowPicker(false)}/>
+      )}
+      <div style={{ background:"#fff", borderRadius:12, border:"1px solid #e2e8f0",
+        overflow:"hidden", boxShadow:"0 2px 12px rgba(0,0,0,.07)" }}>
+        <div style={{ background:"#0f172a", padding:"18px 26px", color:"#fff" }}>
+          <h2 style={{ margin:0, fontSize:17, fontWeight:700 }}>{isEdit?"✏️ Edit Entry":"➕ New Entry"}</h2>
+        </div>
+        <div style={{ padding:26 }}>
+          {/* Category */}
+          <div style={{ marginBottom:20 }}>
+            <label style={lbl}>Category</label>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {CATS.map(c => (
+                <button key={c.id} type="button" onClick={()=>changeCat(c.id)}
+                  style={{ padding:"7px 16px", borderRadius:20, cursor:"pointer", fontSize:12.5, fontWeight:600,
+                    border:`2px solid ${cat===c.id?c.color:"#e2e8f0"}`,
+                    background:cat===c.id?c.color:"#fff", color:cat===c.id?"#fff":"#6b7280" }}>
+                  {c.short}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Name */}
+          <div style={{ marginBottom:14 }}>
+            <label style={lbl}>{cat==="drug"?"Medication Name/s":"Name"} *</label>
+            <input value={form.name||""} onChange={e=>set("name",e.target.value)}
+              style={inp} placeholder="Enter name…"/>
+          </div>
+          {cat==="drug" && (
+            <div style={{ marginBottom:14 }}>
+              <label style={lbl}>Drug Class</label>
+              <input value={form.drugClass||""} onChange={e=>set("drugClass",e.target.value)}
+                style={inp} placeholder="e.g. Biguanide, SSRI…"/>
+            </div>
+          )}
+          <div style={{ marginBottom:14 }}>
+            <label style={lbl}>Body System</label>
+            <select value={form.bodySystem||""} onChange={e=>set("bodySystem",e.target.value)}
+              style={{ ...inp, height:36, cursor:"pointer" }}>
+              <option value="">— Select system —</option>
+              {SYSTEMS.map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom:20 }}>
+            <label style={lbl}>Tags</label>
+            <TagInput tags={tags} onChange={setTags} allTags={allTags}/>
+          </div>
+          {fields.map(f => (
+            <div key={`${f.key}_${fKey}`} style={{ marginBottom:20 }}>
+              <label style={lbl}>{f.label}</label>
+              <RichEditor key={`${f.key}_${fKey}`} initVal={form[f.key]||""} onChange={v=>set(f.key,v)}/>
+            </div>
+          ))}
+          {/* Linked entries */}
+          <div style={{ marginBottom:20 }}>
+            <label style={lbl}>Linked Entries</label>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:8 }}>
+              {linked.map(id => {
+                const e = entries.find(x=>x.id===id);
+                if (!e) return null;
+                const c = CATS.find(c=>c.id===e.category);
+                return (
+                  <span key={id} style={{ display:"inline-flex", alignItems:"center", gap:6,
+                    background:"#f1f5f9", border:"1px solid #e2e8f0", borderRadius:8, padding:"3px 8px 3px 6px", fontSize:12.5 }}>
+                    <span style={badge(c.color)}>{c.short}</span>
+                    <span style={{ fontWeight:600, color:"#0f172a" }}>{e.name}</span>
+                    <span onClick={()=>setLinked(l=>l.filter(x=>x!==id))}
+                      style={{ cursor:"pointer", color:"#94a3b8", fontWeight:900, fontSize:13 }}>×</span>
+                  </span>
+                );
+              })}
+            </div>
+            <button type="button" onClick={()=>setShowPicker(true)}
+              style={{ ...btn, background:"#eff6ff", color:"#2563eb", padding:"6px 14px", fontSize:12.5 }}>
+              🔗 Link an entry
+            </button>
+          </div>
+          {err && <p style={{ color:"#dc2626", fontSize:13, margin:"0 0 12px" }}>{err}</p>}
+          <div style={{ display:"flex", gap:10 }}>
+            <button type="button" onClick={submit}
+              style={{ ...btn, background:"#0f172a", color:"#fff" }}>
+              {isEdit?"Save Changes":"Add Entry"}
+            </button>
+            <button type="button" onClick={onCancel}
+              style={{ ...btn, background:"#f1f5f9", color:"#475569", border:"1px solid #e2e8f0" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Detail panel ──────────────────────────────────────────────────────────────
+function DetailPanel({ entry, entries, onClose, onEdit, onDelete, onNavigate }) {
+  const cat = CATS.find(c=>c.id===entry.category);
+  const fields = FIELDS[entry.category] || [];
+  const linkedEntries = (entry.linked||[]).map(id=>entries.find(e=>e.id===id)).filter(Boolean);
+  const backlinked = entries.filter(e=>e.id!==entry.id && (e.linked||[]).includes(entry.id));
+
+  return (
+    <div style={{ height:"100%", overflow:"auto", padding:"22px 24px" }}>
+      <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:20 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap" }}>
+            <span style={badge(cat.color)}>{cat.short}</span>
+            {entry.bodySystem && (
+              <span style={{ fontSize:11.5, color:"#94a3b8", fontWeight:500, background:"#f1f5f9", padding:"2px 8px", borderRadius:8 }}>
+                {entry.bodySystem}
+              </span>
+            )}
+            {(entry.tags||[]).map(t=><TagPill key={t} tag={t}/>)}
+          </div>
+          <h2 style={{ margin:0, fontSize:22, fontWeight:800, color:"#0f172a", lineHeight:1.2 }}>{entry.name}</h2>
+          {entry.drugClass && (
+            <div style={{ fontSize:13, color:"#64748b", marginTop:4 }}>
+              Class: <b style={{ color:"#374151" }}>{entry.drugClass}</b>
+            </div>
+          )}
+          {entry.createdAt && (
+            <div style={{ fontSize:11, color:"#cbd5e1", marginTop:3 }}>
+              Added {new Date(entry.createdAt).toLocaleDateString("en-NZ",{day:"numeric",month:"short",year:"numeric"})}
+            </div>
+          )}
+        </div>
+        <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+          <button onClick={()=>onEdit(entry)}
+            style={{ background:"#eff6ff", color:"#2563eb", border:"none", borderRadius:6, padding:"6px 12px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+            ✏️ Edit
+          </button>
+          <button onClick={()=>{ if(window.confirm(`Delete "${entry.name}"?`)) onDelete(entry.id); }}
+            style={{ background:"#fef2f2", color:"#dc2626", border:"none", borderRadius:6, padding:"6px 12px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+            🗑
+          </button>
+          <button onClick={onClose}
+            style={{ background:"#f1f5f9", color:"#64748b", border:"none", borderRadius:6, padding:"6px 10px", cursor:"pointer", fontSize:13 }}>
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {fields.map(f => hasContent(entry[f.key]) ? (
+        <div key={f.key} style={{ marginBottom:20 }}>
+          <div style={{ fontSize:10.5, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".7px", marginBottom:8 }}>
+            {f.label}
+          </div>
+          <div style={{ fontSize:13.5, lineHeight:1.7, color:"#1e293b", background:"#f8fafc",
+            borderRadius:8, padding:"12px 16px", border:"1px solid #e2e8f0" }}
+            dangerouslySetInnerHTML={{ __html: entry[f.key] }}/>
+        </div>
+      ) : null)}
+
+      {(linkedEntries.length > 0 || backlinked.length > 0) && (
+        <div style={{ background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:10, padding:"14px 16px", marginTop:8 }}>
+          {linkedEntries.length > 0 && (
+            <div style={{ marginBottom: backlinked.length>0?14:0 }}>
+              <div style={{ fontSize:10.5, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".7px", marginBottom:8 }}>
+                🔗 Linked to
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {linkedEntries.map(e => {
+                  const c = CATS.find(c=>c.id===e.category);
+                  return (
+                    <span key={e.id} onClick={()=>onNavigate(e.id)}
+                      style={{ display:"inline-flex", alignItems:"center", gap:6, background:"#fff",
+                        border:"1px solid #e2e8f0", borderRadius:8, padding:"4px 10px 4px 6px",
+                        fontSize:12.5, cursor:"pointer" }}
+                      onMouseEnter={ev=>ev.currentTarget.style.borderColor="#94a3b8"}
+                      onMouseLeave={ev=>ev.currentTarget.style.borderColor="#e2e8f0"}>
+                      <span style={badge(c.color)}>{c.short}</span>
+                      <span style={{ fontWeight:600, color:"#0f172a" }}>{e.name}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {backlinked.length > 0 && (
+            <div>
+              <div style={{ fontSize:10.5, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".7px", marginBottom:8 }}>
+                ← Referenced by
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {backlinked.map(e => {
+                  const c = CATS.find(c=>c.id===e.category);
+                  return (
+                    <span key={e.id} onClick={()=>onNavigate(e.id)}
+                      style={{ display:"inline-flex", alignItems:"center", gap:6, background:"#fff",
+                        border:"1px solid #e2e8f0", borderRadius:8, padding:"4px 10px 4px 6px",
+                        fontSize:12.5, cursor:"pointer" }}
+                      onMouseEnter={ev=>ev.currentTarget.style.borderColor="#94a3b8"}
+                      onMouseLeave={ev=>ev.currentTarget.style.borderColor="#e2e8f0"}>
+                      <span style={badge(c.color)}>{c.short}</span>
+                      <span style={{ fontWeight:600, color:"#0f172a" }}>{e.name}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Browse view ───────────────────────────────────────────────────────────────
+function BrowseView({ filtered, entries, search, setSearch, filterCat, setFilterCat,
+  filterSys, setFilterSys, filterTag, setFilterTag, selected, setSelected,
+  onDelete, onEdit, allTags }) {
+  const selEntry = entries.find(e=>e.id===selected);
+  return (
+    <div style={{ display:"flex", height:"calc(100vh - 52px)" }}>
+      <div style={{ width:296, flexShrink:0, borderRight:"1px solid #e2e8f0",
+        display:"flex", flexDirection:"column", background:"#fff" }}>
+        <div style={{ padding:"10px 10px 8px", borderBottom:"1px solid #f1f5f9" }}>
+          <input value={search} onChange={e=>setSearch(e.target.value)}
+            placeholder="🔍  Search…" style={{ ...inp, marginBottom:6 }}/>
+          <div style={{ display:"flex", gap:4, marginBottom:4 }}>
+            <select value={filterCat} onChange={e=>setFilterCat(e.target.value)}
+              style={{ ...inp, flex:1, height:30, fontSize:11, padding:"4px 6px", cursor:"pointer" }}>
+              <option value="all">All types</option>
+              {CATS.map(c=><option key={c.id} value={c.id}>{c.short}</option>)}
+            </select>
+            <select value={filterSys} onChange={e=>setFilterSys(e.target.value)}
+              style={{ ...inp, flex:1, height:30, fontSize:11, padding:"4px 6px", cursor:"pointer" }}>
+              <option value="all">All systems</option>
+              {SYSTEMS.map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <select value={filterTag} onChange={e=>setFilterTag(e.target.value)}
+            style={{ ...inp, height:30, fontSize:11, padding:"4px 6px", cursor:"pointer" }}>
+            <option value="all">All tags</option>
+            {allTags.map(t=><option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+        <div style={{ flex:1, overflow:"auto", padding:"8px" }}>
+          {filtered.length === 0 ? (
+            <div style={{ color:"#94a3b8", fontSize:13, textAlign:"center", padding:"30px 10px" }}>
+              {(search||filterCat!=="all"||filterSys!=="all"||filterTag!=="all")
+                ? "No entries match."
+                : <span>No entries yet.<br/>Click <b>➕ New Entry</b> to start.</span>}
+            </div>
+          ) : filtered.map(e => {
+            const c = CATS.find(c=>c.id===e.category);
+            const isSel = e.id===selected;
+            return (
+              <div key={e.id} onClick={()=>setSelected(isSel?null:e.id)}
+                style={{ background:isSel?"#fafbff":"#fff",
+                  border:`${isSel?2:1}px solid ${isSel?c.color:"#e2e8f0"}`,
+                  borderRadius:8, padding:"9px 11px", cursor:"pointer", marginBottom:5,
+                  boxShadow:isSel?`0 0 0 3px ${c.color}18`:"none" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:3, flexWrap:"wrap" }}>
+                  <span style={badge(c.color)}>{c.short}</span>
+                  {e.bodySystem && <span style={{ fontSize:10, color:"#94a3b8", fontWeight:500 }}>{e.bodySystem}</span>}
+                </div>
+                <div style={{ fontWeight:600, fontSize:13.5, color:"#0f172a" }}>{e.name}</div>
+                {e.drugClass && <div style={{ fontSize:11.5, color:"#64748b", marginTop:2 }}>{e.drugClass}</div>}
+                {(e.tags||[]).length>0 && (
+                  <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginTop:4 }}>
+                    {(e.tags||[]).map(t=><TagPill key={t} tag={t}/>)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ padding:"6px 12px", borderTop:"1px solid #f1f5f9", fontSize:11, color:"#94a3b8" }}>
+          {filtered.length} result{filtered.length!==1?"s":""}
+        </div>
+      </div>
+      <div style={{ flex:1, overflow:"hidden", background:"#f8fafc" }}>
+        {selEntry ? (
+          <DetailPanel entry={selEntry} entries={entries} onClose={()=>setSelected(null)}
+            onEdit={onEdit} onDelete={onDelete} onNavigate={setSelected}/>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+            justifyContent:"center", height:"100%", gap:8, color:"#94a3b8" }}>
+            <div style={{ fontSize:48 }}>🩺</div>
+            <div style={{ fontSize:14, fontWeight:500 }}>Select an entry to view details</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Table view ────────────────────────────────────────────────────────────────
+function TableView({ entries, allTags, onSelect }) {
+  const [fCat, setFCat] = useState("all");
+  const [fSys, setFSys] = useState("all");
+  const [fTag, setFTag] = useState("all");
+
+  const filtered = entries.filter(e => {
+    if (fCat!=="all" && e.category!==fCat) return false;
+    if (fSys!=="all" && e.bodySystem!==fSys) return false;
+    if (fTag!=="all" && !(e.tags||[]).includes(fTag)) return false;
+    return true;
+  });
+
+  const grouped = SYSTEMS.map(sys => ({
+    sys, items: filtered.filter(e=>e.bodySystem===sys).sort((a,b)=>(a.name||"").localeCompare(b.name||""))
+  })).filter(g=>g.items.length>0);
+  const unassigned = filtered.filter(e=>!e.bodySystem).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+
+  const renderGroup = (label, items) => (
+    <div key={label} style={{ marginBottom:28 }}>
+      <div style={{ fontSize:11.5, fontWeight:700, color:"#64748b", textTransform:"uppercase",
+        letterSpacing:".7px", borderBottom:"2px solid #e2e8f0", paddingBottom:8, marginBottom:10 }}>
+        {label} <span style={{ color:"#cbd5e1", fontWeight:400 }}>({items.length})</span>
+      </div>
+      <table style={{ width:"100%", borderCollapse:"collapse" }}>
+        <thead>
+          <tr style={{ background:"#f8fafc" }}>
+            {["Type","Name","Class","Tags","System","Added"].map(h=>(
+              <th key={h} style={{ padding:"6px 10px", textAlign:"left", fontSize:10.5,
+                fontWeight:700, color:"#94a3b8", borderBottom:"1px solid #e2e8f0", textTransform:"uppercase" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map(e => {
+            const c = CATS.find(c=>c.id===e.category);
+            return (
+              <tr key={e.id} onClick={()=>onSelect(e.id)}
+                style={{ cursor:"pointer", borderBottom:"1px solid #f1f5f9" }}
+                onMouseEnter={ev=>ev.currentTarget.style.background="#f8fafc"}
+                onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
+                <td style={{ padding:"8px 10px" }}><span style={badge(c.color)}>{c.short}</span></td>
+                <td style={{ padding:"8px 10px", fontWeight:600, fontSize:13, color:"#0f172a" }}>{e.name}</td>
+                <td style={{ padding:"8px 10px", fontSize:12.5, color:"#64748b" }}>{e.drugClass||"—"}</td>
+                <td style={{ padding:"8px 10px" }}>
+                  <div style={{ display:"flex", gap:3, flexWrap:"wrap" }}>
+                    {(e.tags||[]).map(t=><TagPill key={t} tag={t}/>)}
+                  </div>
+                </td>
+                <td style={{ padding:"8px 10px", fontSize:12, color:"#94a3b8" }}>{e.bodySystem||"—"}</td>
+                <td style={{ padding:"8px 10px", fontSize:11.5, color:"#cbd5e1" }}>
+                  {e.createdAt?new Date(e.createdAt).toLocaleDateString("en-NZ",{day:"numeric",month:"short"}):"—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  return (
+    <div style={{ maxWidth:1000, margin:"0 auto", padding:"24px 20px 80px" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20, flexWrap:"wrap" }}>
+        <h2 style={{ margin:0, fontSize:18, fontWeight:800, color:"#0f172a" }}>All Entries</h2>
+        <span style={{ background:"#f1f5f9", color:"#64748b", borderRadius:12, padding:"2px 12px", fontSize:13, fontWeight:600 }}>
+          {filtered.length}
+        </span>
+        <div style={{ display:"flex", gap:8, marginLeft:"auto", flexWrap:"wrap" }}>
+          <select value={fCat} onChange={e=>setFCat(e.target.value)}
+            style={{ ...inp, width:"auto", height:32, fontSize:12, padding:"4px 8px", cursor:"pointer" }}>
+            <option value="all">All types</option>
+            {CATS.map(c=><option key={c.id} value={c.id}>{c.short}</option>)}
+          </select>
+          <select value={fSys} onChange={e=>setFSys(e.target.value)}
+            style={{ ...inp, width:"auto", height:32, fontSize:12, padding:"4px 8px", cursor:"pointer" }}>
+            <option value="all">All systems</option>
+            {SYSTEMS.map(s=><option key={s} value={s}>{s}</option>)}
+          </select>
+          <select value={fTag} onChange={e=>setFTag(e.target.value)}
+            style={{ ...inp, width:"auto", height:32, fontSize:12, padding:"4px 8px", cursor:"pointer" }}>
+            <option value="all">All tags</option>
+            {allTags.map(t=><option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      {filtered.length===0
+        ? <div style={{ color:"#94a3b8", fontSize:14 }}>No entries match filters.</div>
+        : (<>{grouped.map(g=>renderGroup(g.sys,g.items))}{unassigned.length>0&&renderGroup("Unassigned",unassigned)}</>)
+      }
+      <div style={{ color:"#94a3b8", fontSize:12, marginTop:8 }}>Click any row to open in Browse view.</div>
+    </div>
+  );
+}
+
+// ── Setup screen ──────────────────────────────────────────────────────────────
+function SetupScreen({ onDone }) {
+  const [url, setUrl] = useState(localStorage.getItem("sb_url")||"");
+  const [key, setKey] = useState(localStorage.getItem("sb_key")||"");
+  const [err, setErr] = useState("");
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    if (!url.trim()||!key.trim()) { setErr("Both fields required."); return; }
+    setTesting(true); setErr("");
+    try {
+      const client = supabase.createClient(url.trim(), key.trim());
+      const { error } = await client.from("entries").select("id").limit(1);
+      if (error) throw error;
+      localStorage.setItem("sb_url", url.trim());
+      localStorage.setItem("sb_key", key.trim());
+      onDone();
+    } catch(e) {
+      setErr("Connection failed: " + (e.message||"Unknown error. Check your URL and key."));
+    }
+    setTesting(false);
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:"#f8fafc", padding:20 }}>
+      <div style={{ background:"#fff", borderRadius:16, border:"1px solid #e2e8f0",
+        padding:36, maxWidth:460, width:"100%", boxShadow:"0 4px 24px rgba(0,0,0,.08)" }}>
+        <div style={{ fontSize:40, marginBottom:12, textAlign:"center" }}>🩺</div>
+        <h1 style={{ fontSize:22, fontWeight:800, color:"#0f172a", marginBottom:4, textAlign:"center" }}>MedKB Setup</h1>
+        <p style={{ fontSize:13.5, color:"#64748b", lineHeight:1.6, marginBottom:24, textAlign:"center" }}>
+          Enter your Supabase credentials to connect your database.
+          These are stored locally in your browser.
+        </p>
+        <div style={{ marginBottom:14 }}>
+          <label style={lbl}>Supabase Project URL</label>
+          <input value={url} onChange={e=>setUrl(e.target.value)}
+            placeholder="https://xxxxxxxxxxxx.supabase.co"
+            style={inp}/>
+        </div>
+        <div style={{ marginBottom:20 }}>
+          <label style={lbl}>Supabase Anon / Public Key</label>
+          <input value={key} onChange={e=>setKey(e.target.value)}
+            placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+            style={{ ...inp, fontFamily:"monospace", fontSize:12 }}/>
+        </div>
+        {err && <p style={{ color:"#dc2626", fontSize:13, marginBottom:12 }}>{err}</p>}
+        <button onClick={test} disabled={testing}
+          style={{ ...btn, background:"#0f172a", color:"#fff", width:"100%",
+            opacity:testing?0.6:1, cursor:testing?"wait":"pointer" }}>
+          {testing?"Testing connection…":"Connect & Open MedKB →"}
+        </button>
+        <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:14, lineHeight:1.6 }}>
+          Find these in your Supabase dashboard under <b>Settings → API</b>.
+          Make sure you've run the setup SQL (see deployment guide).
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [entries, setEntries] = useState([]);
+  const [view, setView] = useState("browse");
+  const [selected, setSelected] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filterCat, setFilterCat] = useState("all");
+  const [filterSys, setFilterSys] = useState("all");
+  const [filterTag, setFilterTag] = useState("all");
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const dbRef = useRef(null);
+
+  const getDb = () => {
+    if (!dbRef.current) dbRef.current = getSupabaseClient();
+    return dbRef.current;
+  };
+
+  useEffect(() => {
+    const db = getDb();
+    if (!db) { setNeedsSetup(true); setLoading(false); return; }
+    loadEntries(db);
+  }, []);
+
+  const loadEntries = async db => {
+    setLoading(true);
+    try {
+      const { data, error } = await db.from("entries").select("*").order("created_at", { ascending:false });
+      if (error) throw error;
+      setEntries((data||[]).map(r=>r.data));
+    } catch(e) {
+      console.error("Load error:", e);
+      if (e.message?.includes("relation") || e.code === "42P01") {
+        alert("Table not found. Please run the setup SQL in your Supabase SQL editor.");
+      }
+    }
+    setLoading(false);
+  };
+
+  const persist = async (entry, isDelete=false) => {
+    const db = getDb(); if (!db) return;
+    setSaving(true);
+    try {
+      if (isDelete) {
+        await db.from("entries").delete().eq("id", entry.id);
+      } else {
+        await db.from("entries").upsert({ id: entry.id, data: entry }, { onConflict:"id" });
+      }
+    } catch(e) { console.error("Save error:", e); alert("Save failed: " + e.message); }
+    setSaving(false);
+  };
+
+  const allTags = [...new Set(entries.flatMap(e=>e.tags||[]))].sort();
+
+  const filtered = entries.filter(e => {
+    if (filterCat!=="all" && e.category!==filterCat) return false;
+    if (filterSys!=="all" && e.bodySystem!==filterSys) return false;
+    if (filterTag!=="all" && !(e.tags||[]).includes(filterTag)) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      const text = Object.values(e).filter(v=>typeof v==="string")
+        .map(v=>v.replace(/<[^>]+>/g,"")).join(" ").toLowerCase();
+      if (!text.includes(q)) return false;
+    }
+    return true;
+  }).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+
+  const addEntry = async entry => {
+    const e = { ...entry, id:uid(), createdAt:Date.now() };
+    const next = [e, ...entries];
+    setEntries(next);
+    await persist(e);
+    setSelected(e.id); setView("browse");
+  };
+
+  const updateEntry = async updated => {
+    const e = { ...updated, updatedAt:Date.now() };
+    const next = entries.map(x=>x.id===e.id?e:x);
+    setEntries(next);
+    await persist(e);
+    setEditing(null); setSelected(e.id); setView("browse");
+  };
+
+  const deleteEntry = async id => {
+    const next = entries.filter(e=>e.id!==id).map(e=>({ ...e, linked:(e.linked||[]).filter(x=>x!==id) }));
+    // update backlink entries in db
+    const affected = entries.filter(e=>(e.linked||[]).includes(id));
+    setEntries(next);
+    await persist({ id }, true);
+    for (const e of affected) {
+      const updated = { ...e, linked:(e.linked||[]).filter(x=>x!==id) };
+      await persist(updated);
+    }
+    setSelected(null);
+  };
+
+  if (needsSetup) return <SetupScreen onDone={()=>{ dbRef.current=null; setNeedsSetup(false); setLoading(true); loadEntries(getDb()); }}/>;
+
+  if (loading) return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center",
+      height:"100vh", background:"#f8fafc", flexDirection:"column", gap:10 }}>
+      <div style={{ fontSize:40 }}>🩺</div>
+      <div style={{ fontSize:15, fontWeight:500, color:"#64748b" }}>Loading MedKB…</div>
+    </div>
+  );
+
+  const navBtn = (v, label) => (
+    <button type="button" onClick={()=>{ setView(v); if(v!=="new") setEditing(null); }}
+      style={{ background:view===v?"#1e293b":"transparent", color:view===v?"#fff":"#94a3b8",
+        border:"none", borderRadius:5, padding:"5px 14px", cursor:"pointer",
+        fontSize:13, fontWeight:500, fontFamily:"inherit" }}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ fontFamily:"'Inter',system-ui,sans-serif", background:"#f8fafc", minHeight:"100vh" }}>
+      <div style={{ background:"#0f172a", color:"#fff", padding:"0 16px",
+        display:"flex", alignItems:"center", height:52,
+        boxShadow:"0 2px 12px rgba(0,0,0,.2)", gap:8 }}>
+        <span style={{ fontWeight:800, fontSize:17, letterSpacing:"-0.5px", marginRight:4 }}>🩺 MedKB</span>
+        <span style={{ flex:1 }}/>
+        {navBtn("browse","📚 Browse")}
+        {navBtn("new","➕ New Entry")}
+        {navBtn("table","📊 Table")}
+        <button type="button" onClick={()=>{ localStorage.removeItem("sb_url"); localStorage.removeItem("sb_key"); dbRef.current=null; setNeedsSetup(true); }}
+          style={{ background:"transparent", color:"#475569", border:"1px solid #334155",
+            borderRadius:5, padding:"4px 10px", cursor:"pointer", fontSize:11, fontFamily:"inherit", marginLeft:8 }}>
+          ⚙️ DB
+        </button>
+        <div style={{ fontSize:11, color:"#475569" }}>
+          {saving ? "💾 saving…" : `${entries.length} entries`}
+        </div>
+      </div>
+
+      {view==="browse" && (
+        <BrowseView
+          filtered={filtered} entries={entries}
+          search={search} setSearch={setSearch}
+          filterCat={filterCat} setFilterCat={setFilterCat}
+          filterSys={filterSys} setFilterSys={setFilterSys}
+          filterTag={filterTag} setFilterTag={setFilterTag}
+          selected={selected} setSelected={setSelected}
+          onDelete={deleteEntry} onEdit={e=>{ setEditing(e); setView("new"); }}
+          allTags={allTags}
+        />
+      )}
+      {view==="new" && (
+        <EntryForm
+          initial={editing} entries={entries} allTags={allTags}
+          onSubmit={editing?updateEntry:addEntry}
+          onCancel={()=>{ setEditing(null); setView("browse"); }}
+        />
+      )}
+      {view==="table" && (
+        <TableView entries={entries} allTags={allTags}
+          onSelect={id=>{ setSelected(id); setView("browse"); }}/>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
